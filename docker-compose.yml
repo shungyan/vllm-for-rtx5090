@@ -1,0 +1,63 @@
+services:
+  vllm:
+    build: .
+    image: vllm-qwen36-nvfp4:latest
+    container_name: vllm-qwen36
+    # Keep OFF until proven stable. vLLM OOM'd this 62GB host (no cap) and hard-
+    # crashed it; once stable, switch back to "always".
+    restart: "no"
+
+    # GPU passthrough — equivalent to `docker run --gpus all`.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # HARD host-memory safety net. This box has 62GB RAM (NOT the GB10's 121GB
+    # unified). Without a cap, a vLLM memory spike triggers the *host* OOM-killer
+    # and locks up the machine. Capping makes the container OOM itself (exit 137)
+    # instead — the host stays alive. memswap_limit == mem_limit disables swap
+    # spill so it fails fast and cleanly. Leaves ~10GB for the OS/desktop.
+    mem_limit: 52g
+    memswap_limit: 52g
+
+    # vLLM uses large shared-memory segments between its worker processes.
+    ipc: host
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      MODEL: unsloth/Qwen3.6-27B-NVFP4
+      SERVED_NAME: qwen3.6-27b
+      # Smaller context than the GB10 config — the NVFP4 weights are ~24GB, so KV
+      # cache room on a 32GB card is tight; 8192 keeps profiling/KV modest. Raise
+      # later if VRAM allows.
+      MAX_LEN: "8192"
+      GPU_UTIL: "0.9"        # ~28.8GB of the 5090's 32GB VRAM (~24GB weights + ~4GB KV)
+      ENFORCE_EAGER: "1"     # skip CUDA-graph capture: big RAM saving + fast startup
+      MAX_NUM_SEQS: "64"     # plenty to demonstrate >8 concurrent; bounds memory
+      LIMIT_MM: '{"image":0,"video":0}'   # text-only: skip 50GB+ vision-encoder profiling
+      MAX_NUM_BATCHED_TOKENS: "4096"      # bound the profiling/prefill batch memory
+      # The GDN linear-attention kernels JIT-compile on first start. Ninja runs one
+      # compiler per core by default; each nvcc/cc1plus needs GBs and OOM'd the box.
+      # Cap parallelism so the (one-time, then cached) compile fits in RAM.
+      MAX_JOBS: "2"
+      FLASHINFER_NVCC_THREADS: "1"
+      HF_HOME: /root/.cache/huggingface
+      # VLLM_API_KEY: "change-me"   # uncomment to require a Bearer token
+
+    volumes:
+      # Reuse the model already downloaded on the host (no 24 GB re-download).
+      # Override the host path with HF_CACHE_DIR if your cache lives elsewhere.
+      - ${HF_CACHE_DIR:-/home/sysadmin/.cache/huggingface}:/root/.cache/huggingface
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 30
+      start_period: 600s   # allow time for model load + CUDA-graph capture
