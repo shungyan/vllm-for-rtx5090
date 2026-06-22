@@ -73,6 +73,16 @@ args+=(--limit-mm-per-prompt "$LIMIT_MM")
 case "${ENFORCE_EAGER,,}" in 1|true|yes) args+=(--enforce-eager) ;; esac
 [ -n "$MAX_NUM_SEQS" ] && args+=(--max-num-seqs "$MAX_NUM_SEQS")
 [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ] && args+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
+# Cap vision input size. Startup profiles the encoder at the model's MAX image
+# feature size (~16384 tokens, ~50GB RAM); capping max_pixels shrinks that
+# profiling (and per-request memory) dramatically — needed to run vision (OCR)
+# on a memory-constrained host. e.g. '{"max_pixels": 1605632}'.
+[ -n "${MM_PROCESSOR_KWARGS:-}" ] && args+=(--mm-processor-kwargs "$MM_PROCESSOR_KWARGS")
+
+# Tool / function calling (OpenAI-compatible). Set TOOL_CALL_PARSER to enable it.
+# Qwen3.6 emits the XML <tool_call><function=name><parameter=...> format, parsed
+# by 'qwen3_xml' (NOT 'hermes', which expects JSON).
+[ -n "${TOOL_CALL_PARSER:-}" ] && args+=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
 
 [ -n "$API_KEY" ] && args+=(--api-key "$API_KEY")
 

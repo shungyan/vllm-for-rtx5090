@@ -3,9 +3,9 @@ services:
     build: .
     image: vllm-qwen36-nvfp4:latest
     container_name: vllm-qwen36
-    # Keep OFF until proven stable. vLLM OOM'd this 62GB host (no cap) and hard-
-    # crashed it; once stable, switch back to "always".
-    restart: "no"
+    # Auto-start on boot + restart on crash. Safe now: nouveau is permanently
+    # blacklisted and mem_limit prevents a host OOM, so it can't crash-loop the box.
+    restart: always
 
     # GPU passthrough — equivalent to `docker run --gpus all`.
     deploy:
@@ -40,13 +40,15 @@ services:
       GPU_UTIL: "0.9"        # ~28.8GB of the 5090's 32GB VRAM (~24GB weights + ~4GB KV)
       ENFORCE_EAGER: "1"     # skip CUDA-graph capture: big RAM saving + fast startup
       MAX_NUM_SEQS: "64"     # plenty to demonstrate >8 concurrent; bounds memory
-      LIMIT_MM: '{"image":0,"video":0}'   # text-only: skip 50GB+ vision-encoder profiling
+      LIMIT_MM: '{"image":1,"video":0}'   # vision ON for OCR (1 image/request)
+      MM_PROCESSOR_KWARGS: '{"max_pixels": 1605632}'  # cap image to ~2048 vision tokens; tames the 50GB encoder profiling
       MAX_NUM_BATCHED_TOKENS: "4096"      # bound the profiling/prefill batch memory
       # The GDN linear-attention kernels JIT-compile on first start. Ninja runs one
       # compiler per core by default; each nvcc/cc1plus needs GBs and OOM'd the box.
       # Cap parallelism so the (one-time, then cached) compile fits in RAM.
       MAX_JOBS: "2"
       FLASHINFER_NVCC_THREADS: "1"
+      TOOL_CALL_PARSER: "qwen3_xml"   # enable OpenAI tool/function calling (Qwen3.6 XML format)
       HF_HOME: /root/.cache/huggingface
       # VLLM_API_KEY: "change-me"   # uncomment to require a Bearer token
 
@@ -54,6 +56,10 @@ services:
       # Reuse the model already downloaded on the host (no 24 GB re-download).
       # Override the host path with HF_CACHE_DIR if your cache lives elsewhere.
       - ${HF_CACHE_DIR:-/home/sysadmin/.cache/huggingface}:/root/.cache/huggingface
+      # Persist the JIT kernel caches (FlashInfer + torch.compile) on the host so
+      # recreates don't re-trigger the slow (~30 min) NVFP4/GDN compile.
+      - ${JIT_CACHE_DIR:-/home/sysadmin/.cache/vllm-jit}/flashinfer:/root/.cache/flashinfer
+      - ${JIT_CACHE_DIR:-/home/sysadmin/.cache/vllm-jit}/vllm:/root/.cache/vllm
 
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
