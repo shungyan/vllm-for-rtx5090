@@ -33,13 +33,17 @@ services:
     environment:
       MODEL: unsloth/Qwen3.6-27B-NVFP4
       SERVED_NAME: qwen3.6-27b
-      # Smaller context than the GB10 config — the NVFP4 weights are ~24GB, so KV
-      # cache room on a 32GB card is tight; 8192 keeps profiling/KV modest. Raise
-      # later if VRAM allows.
-      MAX_LEN: "8192"
-      GPU_UTIL: "0.9"        # ~28.8GB of the 5090's 32GB VRAM (~24GB weights + ~4GB KV)
-      ENFORCE_EAGER: "1"     # skip CUDA-graph capture: big RAM saving + fast startup
-      MAX_NUM_SEQS: "64"     # plenty to demonstrate >8 concurrent; bounds memory
+      # The SEICA agent reads whole manuals into the prompt (~32k tokens/query),
+      # so 8192 overflows -> HTTP 400. 40960 fits a full manual read + the answer.
+      # KV pool must hold this: at GPU_UTIL 0.93 the KV cache is ~48k tokens.
+      MAX_LEN: "40960"
+      GPU_UTIL: "0.93"       # ~30.3GB of 32GB VRAM (~24GB weights + ~4GB KV ≈ 48k tokens)
+      # CUDA graphs ON. Eager mode was launch-overhead bound (GPU 27% util, 148W):
+      # measured 10.7 -> 61.3 tok/s (~5.7x) single-stream decode, util 27% -> 100%.
+      # Safe on this 32GB/62GB-RAM box because MAX_NUM_SEQS=8 keeps the capture set
+      # tiny (graph pool ~0.11GiB), so KV stays ~60k tokens (>= SEICA's 40k).
+      ENFORCE_EAGER: "0"
+      MAX_NUM_SEQS: "8"      # small graph-capture set -> low graph mem -> preserve KV >=40k for SEICA
       LIMIT_MM: '{"image":1,"video":0}'   # vision ON for OCR (1 image/request)
       MM_PROCESSOR_KWARGS: '{"max_pixels": 1605632}'  # cap image to ~2048 vision tokens; tames the 50GB encoder profiling
       MAX_NUM_BATCHED_TOKENS: "4096"      # bound the profiling/prefill batch memory
