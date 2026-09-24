@@ -89,7 +89,7 @@ change, and the compose file reflects that:
 |---|---|---|
 | **Thinking is parsed out server-side** | `REASONING_PARSER=qwen3` | Qwen3.8's template no longer splits `<think>…</think>` back out of an assistant message's `content` when replaying history — it reads `reasoning_content` only. Without the parser, multi-turn tool loops end up with nested think blocks. **API shape changes:** `content` now holds just the final answer, the chain-of-thought moves to the `reasoning` field on the message (vLLM 0.22.1 names it `reasoning`, NOT `reasoning_content` — same key in streaming deltas). Verified 2026-08-26. |
 | **Thinking isn't re-fed every turn** | `DEFAULT_CHAT_TEMPLATE_KWARGS={"preserve_thinking": false}` | Its template defaults `preserve_thinking=true`, which replays every past `<think>` block into each prompt. |
-| **Reasoning depth is tunable** | `chat_template_kwargs={"reasoning_effort": …}` | `xhigh` (template default), `medium`, or `low`. Add it to `DEFAULT_CHAT_TEMPLATE_KWARGS` to change it server-wide if `xhigh` costs too much latency. |
+| **Reasoning depth is tunable** | `chat_template_kwargs={"reasoning_effort": …}` | **New in 3.8 — Qwen3.6 had no such mechanism at all.** Nothing sets it here, so the template's own `default('xhigh')` applies: the MOST verbose level, injecting *"think carefully… validate key assumptions…"* into every request. Measured cost: on a 5-task coding benchmark `xhigh` spent 10,000 tokens and returned EMPTY `content` on 2 of 5; `medium` solved all 5 and was 3–5x cheaper (semver 4,898→1,447 tokens, bucket 4,800→853). `medium` is also the only level that injects no instruction text, so it is the closest match to how 3.6 behaved. Settable per request or server-wide via `DEFAULT_CHAT_TEMPLATE_KWARGS`. |
 | **MTP speculative decoding** | `SPEC_DECODE=1`, `SPEC_NUM_TOKENS=1` | Qwen3.8 ships trained MTP weights (`model_mtp.safetensors`, in the safetensors index so vLLM loads them with the rest). vLLM **shares** the target's `embed_tokens` + `lm_head` with the draft head, so it costs only the extra decoder layer (total model load 23.12 GiB incl. MTP). Measured 76–96 % draft acceptance. Set to `"0"` to disable. |
 | **`lm_head` is still FP8** | `patch_lmhead_bf16.py` | Same problem as 3.6, same fix. The script now takes a repo id and streams the (single, 22.5 GB) shard instead of loading it into RAM. |
 
@@ -110,7 +110,11 @@ defaults here fix that:
 | `MAX_JOBS` / `FLASHINFER_NVCC_THREADS` | `2` / `1` | The GDN linear-attention kernels JIT-compile on first run; ninja's default one-job-per-core spawns many multi-GB compilers and OOMs. One-time cost, then cached. |
 | `MAX_NUM_BATCHED_TOKENS` | `4096` | Bounds prefill/profiling batch memory. |
 | `MAX_LEN` | `40960` | Context length. The SEICA agent reads whole manuals into the prompt (~32 k tokens/query), so 8192 overflowed → HTTP 400. |
-| `GPU_UTIL` | `0.93` | ~30.3 GB of the 32 GB VRAM. Already near this card's ceiling — measured usage lands around 31.7 GB. |
+| `GPU_UTIL` | `0.86` | The fraction of the card vLLM may touch; the rest is left for the desktop. Was 0.93 (crash loop, see the warning below), then 0.90, then 0.86 once OBS/NVENC needed room — this GPU also drives the display. |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | Counters allocator fragmentation; the OOM traces showed 574–665 MB reserved-but-unallocated. |
+| `REVISION` | pinned sha | The `lm_head` patch lives in ONE HF snapshot dir. An upstream commit creates a new snapshot of the same unpatched blobs and the crash returns. Pinned in two places — see the table above. |
+| `SPEC_DECODE` / `SPEC_NUM_TOKENS` | `1` / `1` | MTP speculative decoding (see above). |
+| `REASONING_PARSER` | `qwen3` | Thinking → the `reasoning` field (see above). |
 
 `restart: always` is safe **only** because nouveau is permanently blacklisted and
 `mem_limit` prevents a host OOM, so it can't crash-loop the box. All of the above
@@ -158,7 +162,7 @@ them back out on replay.
 
 ```bash
 uv sync           # creates .venv and installs vLLM + deps
-MAX_JOBS=2 MAX_LEN=40960 GPU_UTIL=0.93 MAX_NUM_SEQS=8 \
+MAX_JOBS=2 MAX_LEN=40960 GPU_UTIL=0.86 MAX_NUM_SEQS=8 \
   REASONING_PARSER=qwen3 TOOL_CALL_PARSER=qwen3_xml ./serve.sh
 ```
 
@@ -175,6 +179,12 @@ Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`.
 - **Single request:** `uv run python test_request.py "your prompt"`
 - **Concurrency test:** `python3 test_parallel.py 32 64` (32 concurrent, 64 tokens each)
 - **Streaming:** add `"stream": true` and use `curl -N`.
+- **Vision is enabled** (8 images/request, `max_pixels` ~2048 vision tokens each;
+  video is off). Send OpenAI-style `image_url` parts with a `data:` URI.
+  **Budget tokens generously for image requests** — at the default `xhigh`
+  reasoning effort a 400-token cap returned EMPTY `content` with no error, because
+  all of it went to thinking. Use >=1500 `max_tokens`, or pass
+  `chat_template_kwargs={"reasoning_effort": "medium"}`.
 - It's a reasoning model — the chain-of-thought comes back in `message.reasoning`
   (not `content`, and NOT `reasoning_content`; streaming deltas use `reasoning` too). Pass `chat_template_kwargs={"enable_thinking": false}` to skip
   thinking entirely, or `{"reasoning_effort": "low"}` to keep it brief.
@@ -189,26 +199,56 @@ server and they're batched together. There is **no hard 8-request limit** in the
 protocol; concurrency is bounded by `--max-num-seqs` (8 here, to protect the KV
 cache) and KV-cache size.
 
-**Measured on Qwen3.8 (2026-08-26)**, RTX 5090, CUDA graphs on, MTP on, `MAX_LEN=40960`:
+**Measured on Qwen3.8 (2026-09-24)**, RTX 5090, CUDA graphs on, MTP on,
+`MAX_LEN=40960`, `GPU_UTIL=0.86`:
 
 | Metric | Value |
 |---|---|
-| GPU KV cache | 116,480 tokens (2.84x concurrency at a full 40,960-token request) |
-| Single-stream decode | ~74 tok/s (vs ~61 tok/s for Qwen3.6 with CUDA graphs, no MTP) |
-| MTP draft acceptance | 76–96 % (mean acceptance length 1.76–1.96 of a max 2.0) |
-| VRAM in use | 31.0 GB of 32.6 GB |
-| Cold start | ~12 min (708 s engine init incl. 83 s compile); warm restarts are far quicker |
+| GPU KV cache | 2.66 GiB = 65,280 tokens (1.59x concurrency at a full 40,960-token request) |
+| Single-stream decode | ~73 tok/s (3-run mean; vs ~61 tok/s for Qwen3.6 with CUDA graphs, no MTP) |
+| MTP draft acceptance | 68–70 % recently, 76–96 % when first measured (`num_speculative_tokens: 1`) |
+| Model weights on GPU | 23.12 GiB (includes MTP — vLLM shares the target's embedding + lm_head with the draft head) |
+| VRAM in use | ~30.3 GB of 32.6 GB, leaving ~1.8–3 GB for the desktop |
+| Engine init (warm) | ~55 s (17 s compile) |
+| Cold start | up to ~7 min — the model is read from spinning disks, see *Storage* below |
 
-The KV cache is large because this checkpoint carries an FP8 `kv_cache_scheme`,
-halving KV bytes per token.
+The KV cache is **already FP8**: the checkpoint carries a `kv_cache_scheme`
+(`num_bits: 8, type: float`) that vLLM applies automatically, even though the
+flag reports `kv_cache_dtype=auto`. The arithmetic confirms it — 16 full-attention
+layers x 2 (K+V) x 4 kv_heads x 256 head_dim = 32,768 elements/token, so BF16
+would be 64.0 KiB/token and FP8 32.0 KiB/token; the measured 42.7 KiB/token
+(which also amortises the 48 GDN layers' mamba state) is below the BF16 figure
+and therefore cannot be BF16. **Passing `--kv-cache-dtype fp8` explicitly is a
+no-op here** and buys no extra context.
 
 > **Sizing warning (learned the hard way, 2026-09-01).** `GPU_UTIL` was 0.93, which
-> gave the KV cache 4.7 GiB / 116,480 tokens and left only ~50–250 MB free. Ordinary
+> gave the KV cache 4.7 GiB / 116,480 tokens and left only ~50-250 MB free. Ordinary
 > prefill scratch buffers then failed to allocate mid-request — `torch.OutOfMemoryError`
 > -> `EngineDeadError` -> the entire engine dies and the container restarts. 7 restarts
 > in 5 days. Every crash logged `GPU KV cache usage: 0.0%`: the KV pool was **empty**
 > while the GPU was **full**. A big KV cache number is not free headroom — it is
-> memory taken away from activations. 0.90 is the safe setting here.
+> memory taken away from activations. Do not go above 0.90; do not go below ~0.84
+> (the KV floor for a single 40,960-token request is 1.65 GiB).
+
+### Storage
+
+`/` is ext4 on a RAID1 of two **spinning** Toshiba DT02ACA200 disks, while a 1.9 TB
+NVMe (`nvme0n1`) sits idle with its array `md126` degraded `[_U]`. The 23.8 GB
+checkpoint, the HF cache and all Docker images live on the HDDs, so a cold restart
+can sit in `D` (uninterruptible disk sleep) for minutes — observed 112 ms write /
+147 ms flush latency at 85 % utilisation. The fast "Model loading took ~10 s" case
+is warm page cache. Recording video into `~/Videos` hits the same array and
+contends directly with model loads. Moving `HF_CACHE_DIR` (and ideally Docker's
+data-root) to the NVMe is the real fix.
+
+### Sharing the GPU with desktop apps
+
+This card also drives the display. vLLM at `GPU_UTIL 0.93` left 644 MB free, which
+was not enough for OBS: NVENC hard-crashed the moment recording started (the OBS
+log ends exactly at `==== Recording Start ====` with no shutdown). 0.86 leaves
+~3 GB, enough for a 1080p NVENC session. DaVinci Resolve needs far more than that —
+stop vLLM before using it. Note this only works because vLLM starts **first** and
+profiles against a free card.
 
 Older Qwen3.6 numbers (text-only, eager, `MAX_LEN=8192`, `MAX_NUM_SEQS=64`), kept
 for reference — they predate CUDA graphs, the 40 k context and Qwen3.8:
