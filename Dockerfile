@@ -1,4 +1,8 @@
-# vLLM OpenAI-compatible server for Qwen/Qwen3.6-27B (NVFP4) on NVIDIA GB10.
+# vLLM OpenAI-compatible server for Qwen/Qwen3.8-27B (NVFP4) on NVIDIA GB10.
+#
+# Identical to Dockerfile.qwen3.6 — the image is model-agnostic, the model is
+# chosen by $MODEL at runtime. The two exist only so each compose file pins its
+# own image tag and neither generation's build can clobber the other's.
 #
 # We need the CUDA *devel* toolkit (nvcc + headers) in the image because
 # FlashInfer JIT-compiles the NVFP4 GEMM kernels at runtime. The GPU driver
