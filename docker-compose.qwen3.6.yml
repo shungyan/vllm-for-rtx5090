@@ -1,0 +1,89 @@
+# PINNED FALLBACK — the previous Qwen3.6-27B stack, kept so it can be rolled back to.
+#
+#   docker compose -f docker-compose.qwen3.6.yml up -d --build
+#
+# Qwen3.6 and Qwen3.8 CANNOT run at the same time: each needs ~24GB of the RTX
+# 5090's 32GB VRAM, and both bind port 8000. Bring the other one down first:
+#
+#   docker compose down                                    # stops Qwen3.8
+#   docker compose -f docker-compose.qwen3.6.yml up -d
+#
+# `restart` defaults to "no" here (unlike the Qwen3.8 stack's "always") so this
+# fallback can't quietly come back at boot and fight Qwen3.8 for the GPU. If you
+# make 3.6 your primary again, start it with RESTART_POLICY=always.
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile.qwen3.6
+    image: vllm-qwen36-nvfp4:latest
+    container_name: vllm-qwen36
+    restart: ${RESTART_POLICY:-no}
+
+    # GPU passthrough — equivalent to `docker run --gpus all`.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # HARD host-memory safety net. This box has 62GB RAM (NOT the GB10's 121GB
+    # unified). Without a cap, a vLLM memory spike triggers the *host* OOM-killer
+    # and locks up the machine. Capping makes the container OOM itself (exit 137)
+    # instead — the host stays alive. memswap_limit == mem_limit disables swap
+    # spill so it fails fast and cleanly. Leaves ~10GB for the OS/desktop.
+    mem_limit: 52g
+    memswap_limit: 52g
+
+    # vLLM uses large shared-memory segments between its worker processes.
+    ipc: host
+
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+
+    environment:
+      MODEL: unsloth/Qwen3.6-27B-NVFP4
+      SERVED_NAME: qwen3.6-27b
+      # The SEICA agent reads whole manuals into the prompt (~32k tokens/query),
+      # so 8192 overflows -> HTTP 400. 40960 fits a full manual read + the answer.
+      # KV pool must hold this: at GPU_UTIL 0.93 the KV cache is ~48k tokens.
+      MAX_LEN: "40960"
+      GPU_UTIL: "0.93"       # ~30.3GB of 32GB VRAM (~24GB weights + ~4GB KV ≈ 48k tokens)
+      # CUDA graphs ON. Eager mode was launch-overhead bound (GPU 27% util, 148W):
+      # measured 10.7 -> 61.3 tok/s (~5.7x) single-stream decode, util 27% -> 100%.
+      # Safe on this 32GB/62GB-RAM box because MAX_NUM_SEQS=8 keeps the capture set
+      # tiny (graph pool ~0.11GiB), so KV stays ~60k tokens (>= SEICA's 40k).
+      ENFORCE_EAGER: "0"
+      MAX_NUM_SEQS: "8"      # small graph-capture set -> low graph mem -> preserve KV >=40k for SEICA
+      LIMIT_MM: '{"image":8,"video":0}'   # was 1 (OCR); raised for the slide-reflection loop which carries several slide screenshots per prompt (max_pixels cap keeps each ~2048 tokens)
+      MM_PROCESSOR_KWARGS: '{"max_pixels": 1605632}'  # cap image to ~2048 vision tokens; tames the 50GB encoder profiling
+      MAX_NUM_BATCHED_TOKENS: "4096"      # bound the profiling/prefill batch memory
+      # The GDN linear-attention kernels JIT-compile on first start. Ninja runs one
+      # compiler per core by default; each nvcc/cc1plus needs GBs and OOM'd the box.
+      # Cap parallelism so the (one-time, then cached) compile fits in RAM.
+      MAX_JOBS: "2"
+      FLASHINFER_NVCC_THREADS: "1"
+      TOOL_CALL_PARSER: "qwen3_xml"   # enable OpenAI tool/function calling (Qwen3.6 XML format)
+      # Qwen3.6 is served WITHOUT a reasoning parser: <think>...</think> stays
+      # inline in `content`, and its chat template strips it back out on replay.
+      # (Qwen3.8's template no longer does — hence --reasoning-parser there.)
+      HF_HOME: /root/.cache/huggingface
+      # VLLM_API_KEY: "change-me"   # uncomment to require a Bearer token
+
+    volumes:
+      # Reuse the model already downloaded on the host (no 24 GB re-download).
+      # Override the host path with HF_CACHE_DIR if your cache lives elsewhere.
+      - ${HF_CACHE_DIR:-/home/sysadmin/.cache/huggingface}:/root/.cache/huggingface
+      # Persist the JIT kernel caches (FlashInfer + torch.compile) on the host so
+      # recreates don't re-trigger the slow (~30 min) NVFP4/GDN compile.
+      - ${JIT_CACHE_DIR:-/home/sysadmin/.cache/vllm-jit}/flashinfer:/root/.cache/flashinfer
+      - ${JIT_CACHE_DIR:-/home/sysadmin/.cache/vllm-jit}/vllm:/root/.cache/vllm
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 30
+      start_period: 600s   # allow time for model load + CUDA-graph capture
