@@ -101,6 +101,9 @@ services:
       # Measured 76-96% draft acceptance. Set to "0" to disable.
       SPEC_DECODE: "1"
       SPEC_NUM_TOKENS: "1"
+      # Multi-round agents resend the whole history each round; with prefix caching
+      # only the new tail is prefilled. Off by default in vLLM for hybrid models.
+      PREFIX_CACHING: "1"
       # Counter allocator fragmentation — the OOM traces showed 574-665MB "reserved
       # but unallocated", and this is the mitigation torch's own error message names.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
