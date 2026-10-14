@@ -140,6 +140,13 @@ case "${SPEC_DECODE,,}" in
     ;;
 esac
 
+# Prefix caching. vLLM leaves it OFF by default for hybrid (GDN/Mamba) models like
+# Qwen3.8, so every agent round re-prefilled the whole conversation. "align" mode
+# caches the GDN state at block boundaries. Uses the existing KV pool, no extra VRAM.
+case "${PREFIX_CACHING,,}" in
+  1|true|yes) args+=(--enable-prefix-caching --mamba-cache-mode "${MAMBA_CACHE_MODE:-align}") ;;
+esac
+
 [ -n "$API_KEY" ] && args+=(--api-key "$API_KEY")
 
 echo "Starting vLLM: model=$MODEL served-as=$SERVED_NAME  http://$HOST:$PORT"
