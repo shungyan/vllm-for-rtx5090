@@ -101,9 +101,12 @@ services:
       # Measured 76-96% draft acceptance. Set to "0" to disable.
       SPEC_DECODE: "1"
       SPEC_NUM_TOKENS: "1"
-      # Multi-round agents resend the whole history each round; with prefix caching
-      # only the new tail is prefilled. Off by default in vLLM for hybrid models.
-      PREFIX_CACHING: "1"
+      # Prefix caching OFF: in vLLM 0.22.1 it corrupts concurrent requests on this hybrid
+      # (GDN) model — with "align" mode, overlapping requests that share a prefix sometimes
+      # lose the tool definitions ("I don't have access to diode_facts"): 20/36 tool calls
+      # at 4–8 concurrent vs 36/36 with it off (2026-10-19). It saved ~12 s per agent round.
+      # Re-test before turning it back on after a vLLM upgrade.
+      PREFIX_CACHING: "0"
       # Counter allocator fragmentation — the OOM traces showed 574-665MB "reserved
       # but unallocated", and this is the mitigation torch's own error message names.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
