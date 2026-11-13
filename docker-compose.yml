@@ -72,7 +72,11 @@ services:
       # Safe on this 32GB/62GB-RAM box because MAX_NUM_SEQS=8 keeps the capture set
       # tiny (graph pool ~0.11GiB), so KV stays ~60k tokens (>= SEICA's 40k).
       ENFORCE_EAGER: "0"
-      MAX_NUM_SEQS: "8"      # small graph-capture set -> low graph mem -> preserve KV >=40k for SEICA
+      # 2 (was 8, 2026-11-13): the engine HANGS (0 tok/s, /health still 200, only a restart fixes it)
+      # whenever KV fills and the scheduler preempts a request. KV is only ~65k tokens, so 4 long
+      # multi-turn tool chats (~20k each) froze it twice. With 2, extra requests wait in the queue
+      # without holding KV. Raise only after re-testing several long requests at once.
+      MAX_NUM_SEQS: "2"      # small graph-capture set -> low graph mem -> preserve KV >=40k for SEICA
       LIMIT_MM: '{"image":8,"video":0}'   # was 1 (OCR); raised for the slide-reflection loop which carries several slide screenshots per prompt (max_pixels cap keeps each ~2048 tokens)
       MM_PROCESSOR_KWARGS: '{"max_pixels": 1605632}'  # cap image to ~2048 vision tokens; tames the 50GB encoder profiling
       MAX_NUM_BATCHED_TOKENS: "4096"      # bound the profiling/prefill batch memory
