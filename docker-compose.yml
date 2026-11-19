@@ -103,7 +103,10 @@ services:
       # so it costs only the one extra decoder layer, NOT the ~5GB an earlier comment
       # here claimed. Measured 2026-09-01: total model load 23.12 GiB incl. MTP.
       # Measured 76-96% draft acceptance. Set to "0" to disable.
-      SPEC_DECODE: "1"
+      # OFF since 2026-11-19: the engine froze mid-request with ONE request running, KV at 39%
+      # and no preemption (0 tok/s, GPU 100% at 113 W, /health 200) — not the concurrency hang.
+      # MTP is the prime suspect. Costs ~75 -> ~45 tok/s. Re-test after a vLLM upgrade.
+      SPEC_DECODE: "0"
       SPEC_NUM_TOKENS: "1"
       # Prefix caching OFF: in vLLM 0.22.1 it corrupts concurrent requests on this hybrid
       # (GDN) model — with "align" mode, overlapping requests that share a prefix sometimes
@@ -132,3 +135,15 @@ services:
       timeout: 5s
       retries: 30
       start_period: 600s   # allow time for model load + CUDA-graph capture
+
+  # Restarts vLLM when it stalls (a request running, no tokens for 90 s). The 2026-11-19 freeze
+  # sat 32 min with /health 200, so the healthcheck and `restart: always` never fired.
+  vllm-watchdog:
+    image: docker:27-cli
+    container_name: vllm-watchdog
+    restart: always
+    depends_on: [vllm]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./watchdog.sh:/watchdog.sh:ro
+    entrypoint: ["/bin/sh", "/watchdog.sh"]
