@@ -656,7 +656,7 @@
   {
    "id": 12,
    "type": "timeseries",
-   "title": "GPU memory and temperature",
+   "title": "GPU memory used",
    "description": "",
    "datasource": {
     "type": "prometheus",
