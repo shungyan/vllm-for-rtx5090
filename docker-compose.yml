@@ -147,3 +147,49 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./watchdog.sh:/watchdog.sh:ro
     entrypoint: ["/bin/sh", "/watchdog.sh"]
+
+  # ── Monitoring: Prometheus stores vLLM's /metrics + the GPU every 5 s; Grafana charts it.
+  # Open http://<host>:3001 → Dashboards → vLLM → "vLLM health" (anonymous view; admin/admin to edit).
+  # Read-only: nothing here touches vLLM, so these can be started/stopped without a vLLM restart.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: vllm-prometheus
+    restart: always
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+
+  gpu-exporter:
+    image: utkuozdemir/nvidia_gpu_exporter:1.3.2     # nvidia-smi → metrics (works on GeForce, unlike DCGM)
+    container_name: vllm-gpu-exporter
+    restart: always
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: utility,compute
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: vllm-grafana
+    restart: always
+    depends_on: [prometheus]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/vllm-health.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3001:3000"]
+
+volumes:
+  prometheus-data:
+  grafana-data:
