@@ -72,7 +72,11 @@ services:
       # Safe on this 32GB/62GB-RAM box because MAX_NUM_SEQS=8 keeps the capture set
       # tiny (graph pool ~0.11GiB), so KV stays ~60k tokens (>= SEICA's 40k).
       ENFORCE_EAGER: "0"
-      MAX_NUM_SEQS: "8"      # small graph-capture set -> low graph mem -> preserve KV >=40k for SEICA
+      # 2 (was 8, 2026-11-13): the engine HANGS (0 tok/s, /health still 200, only a restart fixes it)
+      # whenever KV fills and the scheduler preempts a request. KV is only ~65k tokens, so 4 long
+      # multi-turn tool chats (~20k each) froze it twice. With 2, extra requests wait in the queue
+      # without holding KV. Raise only after re-testing several long requests at once.
+      MAX_NUM_SEQS: "2"      # small graph-capture set -> low graph mem -> preserve KV >=40k for SEICA
       LIMIT_MM: '{"image":8,"video":0}'   # was 1 (OCR); raised for the slide-reflection loop which carries several slide screenshots per prompt (max_pixels cap keeps each ~2048 tokens)
       MM_PROCESSOR_KWARGS: '{"max_pixels": 1605632}'  # cap image to ~2048 vision tokens; tames the 50GB encoder profiling
       MAX_NUM_BATCHED_TOKENS: "4096"      # bound the profiling/prefill batch memory
@@ -99,7 +103,10 @@ services:
       # so it costs only the one extra decoder layer, NOT the ~5GB an earlier comment
       # here claimed. Measured 2026-09-01: total model load 23.12 GiB incl. MTP.
       # Measured 76-96% draft acceptance. Set to "0" to disable.
-      SPEC_DECODE: "1"
+      # OFF since 2026-11-19: the engine froze mid-request with ONE request running, KV at 39%
+      # and no preemption (0 tok/s, GPU 100% at 113 W, /health 200) — not the concurrency hang.
+      # MTP is the prime suspect. Costs ~75 -> ~45 tok/s. Re-test after a vLLM upgrade.
+      SPEC_DECODE: "0"
       SPEC_NUM_TOKENS: "1"
       # Prefix caching OFF: in vLLM 0.22.1 it corrupts concurrent requests on this hybrid
       # (GDN) model — with "align" mode, overlapping requests that share a prefix sometimes
@@ -128,3 +135,61 @@ services:
       timeout: 5s
       retries: 30
       start_period: 600s   # allow time for model load + CUDA-graph capture
+
+  # Restarts vLLM when it stalls (a request running, no tokens for 90 s). The 2026-11-19 freeze
+  # sat 32 min with /health 200, so the healthcheck and `restart: always` never fired.
+  vllm-watchdog:
+    image: docker:27-cli
+    container_name: vllm-watchdog
+    restart: always
+    depends_on: [vllm]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./watchdog.sh:/watchdog.sh:ro
+    entrypoint: ["/bin/sh", "/watchdog.sh"]
+
+  # ── Monitoring: Prometheus stores vLLM's /metrics + the GPU every 5 s; Grafana charts it.
+  # Open http://<host>:3001 → Dashboards → vLLM → "vLLM health" (anonymous view; admin/admin to edit).
+  # Read-only: nothing here touches vLLM, so these can be started/stopped without a vLLM restart.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: vllm-prometheus
+    restart: always
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+
+  gpu-exporter:
+    image: utkuozdemir/nvidia_gpu_exporter:1.3.2     # nvidia-smi → metrics (works on GeForce, unlike DCGM)
+    container_name: vllm-gpu-exporter
+    restart: always
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: utility,compute
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: vllm-grafana
+    restart: always
+    depends_on: [prometheus]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/vllm-health.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3001:3000"]
+
+volumes:
+  prometheus-data:
+  grafana-data:
