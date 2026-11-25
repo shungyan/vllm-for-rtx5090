@@ -259,6 +259,21 @@ for reference — they predate CUDA graphs, the 40 k context and Qwen3.8:
 | 32 | 32/32 ✅ | ~145 tok/s |
 | 48 | 48/48 ✅ | ~146 tok/s |
 
+## CI/CD
+
+Runs on a self-hosted runner on this server (labels `self-hosted, vllm`), registered to this repo.
+
+- **CI** (`.github/workflows/ci.yml`, every PR and push to main; skips `.md`-only changes and PRs from forks):
+  ruff, shellcheck, hadolint → image build → Anchore/Grype scan (fails on *fixable* critical CVEs) →
+  `ci/offline_checks.sh` (vLLM version matches `uv.lock`, compose files, Prometheus config, dashboards,
+  `ci/test_watchdog.sh`). Never touches the GPU.
+- **CD** (`.github/workflows/cd.yml`, after CI passes on main): `ci/deploy.sh` fast-forwards
+  `~/vllm-for-dgx-spark` (must be clean and on `main`), builds, waits until vLLM has no requests and no AMC
+  tuning run is active (`ci/wait_idle.sh`), swaps the container (~3 min down), waits for health, runs the GPU
+  tests (`ci/live_test.py`: model + 40,960 context, reasoning parser, tool call, image, ~30k-token prompt,
+  2 requests at once), and rolls back to the previous image and compose file if any fails.
+- Run the GPU tests by hand any time: `python3 ci/live_test.py`.
+
 ## Repository layout
 
 | File | Purpose |

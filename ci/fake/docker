@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake docker for ci/test_watchdog.sh: record the call instead of restarting anything.
+echo "FAKE docker $*"

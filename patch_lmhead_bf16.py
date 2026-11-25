@@ -33,7 +33,12 @@ Then: docker compose up -d   (first boot recompiles ~2-3 min, then cached).
   argv[1] / $SNAPSHOT_DIR : snapshot dir to patch  (default: auto-find in HF cache)
   argv[2] / $MODEL_REPO   : HF repo id to auto-find (default: the value below)
 """
-import glob, json, os, struct, sys, torch
+import glob
+import json
+import os
+import struct
+import sys
+import torch
 from safetensors import safe_open
 
 DEFAULT_REPO = "unsloth/Qwen3.8-27B-NVFP4"

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Fake vLLM /metrics for ci/test_watchdog.sh: one request running; tokens stuck (MODE=stuck) or advancing (flowing).
+n=$(cat /tmp/n 2>/dev/null || echo 0)
+[ "$MODE" = flowing ] && n=$((n + 1))
+echo "$n" > /tmp/n
+printf 'vllm:num_requests_running{model_name="m"} 1.0\nvllm:generation_tokens_total{model_name="m"} %s.0\n' "$n"

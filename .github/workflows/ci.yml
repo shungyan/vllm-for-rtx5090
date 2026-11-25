@@ -1,0 +1,43 @@
+# CI — on every PR and every push to main, on the self-hosted runner on the GPU server (labels: self-hosted, vllm).
+# Never touches the GPU: the live vLLM holds it. The GPU test is CD's job (cd.yml).
+name: CI
+on:
+  pull_request:
+    paths-ignore: ['**.md']
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  IMAGE: vllm-ci:${{ github.sha }}
+jobs:
+  ci:
+    # Public repo + a self-hosted runner with the Docker socket: never run a fork's code on this server.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, vllm]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint — Python (ruff)
+        run: PATH="$HOME/.local/bin:$PATH" uvx ruff@0.8.6 check .
+      - name: Lint — shell (shellcheck, warnings and errors)
+        run: docker run --rm -v "$PWD:/m:ro" -w /m koalaman/shellcheck:v0.10.0 -S warning serve.sh watchdog.sh ci/*.sh ci/fake/*
+      - name: Lint — Dockerfiles (hadolint, errors only)
+        run: for f in Dockerfile Dockerfile.qwen3.6; do docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold error - < "$f" || exit 1; done
+      - name: Container — the image builds
+        run: docker build -t "$IMAGE" .
+      - name: Container — no fixable critical CVEs (Anchore scan, Grype)
+        uses: anchore/scan-action@v7
+        with:
+          image: ${{ env.IMAGE }}
+          severity-cutoff: critical     # fail on critical only; high and below are reported, not blocking
+          only-fixed: true              # a CVE with no fixed version can't be acted on, so it doesn't block
+          fail-build: true
+          output-format: table
+      - name: Functional checks (offline, no GPU)
+        run: sh ci/offline_checks.sh "$IMAGE"
+      - name: Clean up
+        if: always()
+        run: docker rmi -f "$IMAGE" >/dev/null 2>&1 || true
