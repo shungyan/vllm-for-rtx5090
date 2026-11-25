@@ -1,6 +1,8 @@
-# CD — after CI passes on a push to main: wait until nothing is using vLLM, swap the live container to the tested
-# commit, test it on the real GPU, and roll back to the previous image if the test fails. One GPU, so this is a swap
-# (a few minutes of downtime), not a side-by-side test.
+# CD — after CI passes on a push to main, on the self-hosted runner on the GPU server (labels: self-hosted, vllm).
+# Only push events reach this job, and workflow_run always uses main's copy of this file, so forks can't run it.
+# 1. Build the image and gate it: Anchore scan (no fixable critical CVEs) + image checks. Fail → nothing is deployed.
+# 2. Wait until nothing is using vLLM, swap the live container, test it on the real GPU, roll back on failure.
+#    One GPU, so this is a swap (a few minutes of downtime), not a side-by-side test.
 name: CD
 on:
   workflow_run:
@@ -16,10 +18,26 @@ jobs:
     runs-on: [self-hosted, vllm]
     timeout-minutes: 480          # waits for an AMC tuning run to finish first, which can take hours
     env:
+      IMAGE: vllm-cd:${{ github.event.workflow_run.head_sha }}
       LIVE_DIR: /home/sysadmin/vllm-for-dgx-spark   # the live stack runs from this checkout (bind mounts, project name)
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Build the image
+        run: docker build -t "$IMAGE" .
+      - name: Gate — no fixable critical CVEs (Anchore scan, Grype)
+        uses: anchore/scan-action@v7
+        with:
+          image: ${{ env.IMAGE }}
+          severity-cutoff: critical     # fail on critical only; high and below are reported, not blocking
+          only-fixed: true              # a CVE with no fixed version can't be acted on, so it doesn't block
+          fail-build: true
+          output-format: table
+      - name: Gate — image checks (vLLM version matches uv.lock, launcher parses)
+        run: sh ci/image_checks.sh "$IMAGE"
       - name: Swap, test on the GPU, roll back on failure
-        run: sh ci/deploy.sh "${{ github.event.workflow_run.head_sha }}"
+        run: sh ci/deploy.sh "${{ github.event.workflow_run.head_sha }}" "$IMAGE"   # deploys the scanned image as-is
+      - name: Clean up
+        if: always()
+        run: docker rmi "$IMAGE" >/dev/null 2>&1 || true   # drops the tag only; the layers stay for the live image

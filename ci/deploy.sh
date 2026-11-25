@@ -1,10 +1,12 @@
 #!/bin/sh
-# CD: move the live stack to commit $1, rebuild, test on the GPU (ci/live_test.py), roll back on failure.
-#   sh ci/deploy.sh <sha>
+# CD: move the live stack to commit $1 running image $2 (the one cd.yml built and scanned), test it on the GPU
+# (ci/live_test.py), roll back on failure.
+#   sh ci/deploy.sh <sha> <image>
 # Runs from LIVE_DIR (default ~/vllm-for-dgx-spark) with project name vllm-for-dgx-spark: the watchdog and the
 # monitoring bind-mount files from that folder, and AMC reaches vLLM over the vllm-for-dgx-spark_default network.
 set -eu
 SHA=$1
+NEW=$2
 LIVE=${LIVE_DIR:-$HOME/vllm-for-dgx-spark}
 IMG=vllm-qwen38-nvfp4
 dc() { docker compose -p vllm-for-dgx-spark "$@"; }
@@ -17,9 +19,9 @@ git fetch -q origin
 git merge -q --ff-only "$SHA"
 
 docker tag "$IMG:latest" "$IMG:previous"
-dc build vllm                  # CI built this commit already, so the layers come from the cache
 sh ci/wait_idle.sh
-dc up -d
+docker tag "$NEW" "$IMG:latest"   # deploy exactly the scanned image, no rebuild
+dc up -d --no-build
 if sh ci/wait_healthy.sh && python3 ci/live_test.py; then
   echo "deployed $SHA"
   exit 0

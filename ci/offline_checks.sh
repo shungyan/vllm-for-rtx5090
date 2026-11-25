@@ -1,17 +1,7 @@
 #!/bin/sh
-# CI functional checks that need no GPU:  sh ci/offline_checks.sh <image>
+# CI functional checks that need no image and no GPU:  sh ci/offline_checks.sh
 set -eu
 cd "$(dirname "$0")/.."
-IMAGE=$1
-
-want=$(grep -A1 '^name = "vllm"$' uv.lock | sed -n 's/^version = "\(.*\)"/\1/p')
-echo "== the image has vLLM $want (uv.lock) and its launcher"
-docker run --rm --entrypoint python "$IMAGE" -c "
-import vllm, transformers
-assert vllm.__version__ == '$want', vllm.__version__
-print('vllm', vllm.__version__, 'transformers', transformers.__version__)"
-docker run --rm --entrypoint bash "$IMAGE" -n /app/serve.sh
-
 echo "== compose files are valid"
 docker compose -f docker-compose.yml config -q
 docker compose -f docker-compose.qwen3.6.yml config -q

@@ -261,17 +261,18 @@ for reference — they predate CUDA graphs, the 40 k context and Qwen3.8:
 
 ## CI/CD
 
-Runs on a self-hosted runner on this server (labels `self-hosted, vllm`), registered to this repo.
-
-- **CI** (`.github/workflows/ci.yml`, every PR and push to main; skips `.md`-only changes and PRs from forks):
-  ruff, shellcheck, hadolint → image build → Anchore/Grype scan (fails on *fixable* critical CVEs) →
-  `ci/offline_checks.sh` (vLLM version matches `uv.lock`, compose files, Prometheus config, dashboards,
-  `ci/test_watchdog.sh`). Never touches the GPU.
-- **CD** (`.github/workflows/cd.yml`, after CI passes on main): `ci/deploy.sh` fast-forwards
-  `~/vllm-for-dgx-spark` (must be clean and on `main`), builds, waits until vLLM has no requests and no AMC
-  tuning run is active (`ci/wait_idle.sh`), swaps the container (~3 min down), waits for health, runs the GPU
-  tests (`ci/live_test.py`: model + 40,960 context, reasoning parser, tool call, image, ~30k-token prompt,
-  2 requests at once), and rolls back to the previous image and compose file if any fails.
+- **CI** (`.github/workflows/ci.yml`, every PR and push to main, skips `.md`-only changes) runs on **GitHub's own
+  runner**, so a PR from a fork never touches this server: ruff, shellcheck, hadolint → `ci/offline_checks.sh`
+  (compose files, Prometheus config, dashboards, `ci/test_watchdog.sh`).
+- **CD** (`.github/workflows/cd.yml`, after CI passes on main) runs on a **self-hosted runner on this server**
+  (labels `self-hosted, vllm`, registered to this repo):
+  1. **Gate**: build the image → Anchore/Grype scan (fails on *fixable* critical CVEs) → `ci/image_checks.sh`
+     (vLLM version matches `uv.lock`, launcher parses). Any failure → nothing is deployed.
+  2. **Deploy**: `ci/deploy.sh` fast-forwards `~/vllm-for-dgx-spark` (must be clean and on `main`), waits until vLLM
+     has no requests and no AMC tuning run is active (`ci/wait_idle.sh`), swaps in **exactly the scanned image**
+     (~3 min down), waits for health, runs the GPU tests (`ci/live_test.py`: model + 40,960 context, reasoning
+     parser, tool call, image, ~30k-token prompt, 2 requests at once), and rolls back to the previous image and
+     compose file if any fails.
 - Run the GPU tests by hand any time: `python3 ci/live_test.py`.
 
 ## Repository layout
